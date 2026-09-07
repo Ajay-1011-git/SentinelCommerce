@@ -3,6 +3,7 @@ node_modules/
 __pycache__/
 *.pyc
 cdk.out/
+cdk.context.json
 .cdk.staging/
 *.egg-info/
 .DS_Store
