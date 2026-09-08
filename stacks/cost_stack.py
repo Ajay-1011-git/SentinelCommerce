@@ -1,8 +1,15 @@
 """CostStack - the budget and the human-facing alert subscriptions.
 
-Module 5 (cost / budget discipline). The CDK Budget here is a second,
-code-managed layer on top of the manual console Budget already set as a
-safety net.
+Module 5 (cost / budget discipline). Unchanged by the zero-cost refactor,
+and the point is now *stronger*: SentinelCommerce is architected for
+genuine $0 running cost (every billable service sits inside a permanent
+free tier, except RDS whose free tier is 12-month - see README). This
+`CfnBudget` is purely a safety net - it fires if a free-tier limit is ever
+exceeded by accident, e.g. leaving the RDS instance (and a promoted read
+replica) running for a full month beyond the 750-hour allowance.
+
+AWS Budgets: first 2 budgets per account are free. SNS: 1M publishes +
+1k email notifications/month free.
 """
 from aws_cdk import Stack
 from aws_cdk import aws_budgets as budgets
