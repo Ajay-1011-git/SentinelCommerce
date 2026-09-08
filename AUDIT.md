@@ -1,52 +1,72 @@
 # Build Audit Log
 
-Each task from `sentinelcommerce_claude_code_prompt.md` is implemented, then
-audited (`cdk synth` + resource presence + `py_compile` + `bash -n`) and
-pushed. No `cdk deploy` or resource-creating AWS CLI command has been run —
-per Safety Rule 1, that waits for an explicit "deploy now".
+## Zero-cost refactor (current)
 
-| Task | Status | Audit |
-|------|--------|-------|
-| Scaffold (app.py, cdk.json, tags, env-from-context) | done | `cdk synth` OK |
-| 1. NetworkStack | done | VPC + 1 NAT + 3 subnet tiers synth OK |
-| 2. DataStack | done | `AWS::RDS::DBCluster` x1 (writer+reader), DynamoDB table + stream synth OK |
-| 3. SecurityStack | done | KMS key x1, WAFv2 WebACL (3 rules), demo SG synth OK |
-| 4. ComputeStack | done | REST API + 6 Lambdas + `EventSourceMapping` + `WebACLAssociation` synth OK |
-| 5. GovernanceStack | done | `Config::ConfigRule` + `RemediationConfiguration` + `SSM::Document` synth OK |
-| 6. ObservabilityStack | done | Dashboard + CloudTrail + metric-filter alarm synth OK |
-| 7. CostStack | done | `Budgets::Budget` + SNS subscriptions synth OK |
-| Deliverables (scripts, RUNBOOK, README, TEARDOWN) | done | `py_compile` + `bash -n` OK |
+Every component with no free tier was removed. `cdk synth` is clean (7
+templates, exit 0). **Forbidden resource types — verified ABSENT in all
+synthesized templates:**
 
-## Known verify-before-deploy items (Safety Rule 5)
+| Type | Present? |
+|------|----------|
+| `AWS::RDS::DBCluster` (Aurora) | ❌ none |
+| `AWS::EC2::NatGateway` | ❌ none |
+| `AWS::KMS::Key` (customer-managed) | ❌ none |
+| `AWS::SecretsManager::Secret` | ❌ none |
+| `AWS::WAFv2::WebACL` | ❌ none |
+| `AWS::Config::*` | ❌ none |
 
-* **AWS Config managed rule identifier** for restricted SSH is set to
-  `INCOMING_SSH_DISABLED` in `stacks/governance_stack.py`. Confirm against
-  the current AWS Config "List of Managed Rules" documentation before
-  deploy — AWS has renamed rule source identifiers before.
-* **WAF + REST API association** uses `CfnWebACLAssociation` with the stage
-  ARN `arn:aws:apigateway:<region>::/restapis/<id>/stages/prod`. Confirm
-  this is still the supported association path.
-* Synth here runs **environment-agnostic** (no AWS credentials in the build
-  environment). A real `cdk synth`/`deploy` with credentials will also run
-  the VPC AZ context lookup.
+### What replaced what
 
-## Billable resources (produced from `cdk synth`, for pre-deploy sanity check)
+| Removed (had cost) | Replacement ($0) |
+|--------------------|------------------|
+| NAT gateway | `nat_gateways=0`; only RDS + 2 Lambdas are in the VPC (isolated), everything else uses default Lambda networking |
+| Aurora cluster | `rds.DatabaseInstance` MySQL `db.t4g.micro`, single-AZ, 20 GB |
+| Secrets Manager generated secret | SSM `String` parameter `/sentinelcommerce/db-password` (operator-created), injected at deploy via `{{resolve:ssm:...}}` |
+| KMS CMK | AWS-owned/AWS-managed keys (DynamoDB default, RDS `aws/rds`) |
+| WAFv2 WebACL | API Gateway Lambda REQUEST authorizer: regex signatures + DynamoDB fixed-window per-IP rate limit |
+| AWS Config + SSM Automation | `security_group_watchdog` Lambda on a 5-min EventBridge schedule (+ on-demand invoke) |
+| CloudTrail Trail + S3 + Logs + metric filter/alarm | built-in 90-day CloudTrail Event History (`lookup-events`) — no resource |
 
-| Resource | Approx cost (ap-south-1) | Notes |
-|----------|--------------------------|-------|
-| Aurora PostgreSQL Serverless v2, writer+reader | ~$0.12/ACU-hr; 0.5 ACU min → ~$0.06/hr each idle | Free Plan blocks Aurora MySQL; engine switched to aurora-postgresql |
-| Aurora storage + I/O | ~$0.10/GB-mo + I/O | small for demo data |
-| NAT Gateway x1 | ~$0.045/hr + $0.045/GB | single NAT by design |
-| Secrets Manager secret x1 | ~$0.40/mo + $0.05/10k API calls | |
-| KMS CMK x1 | $1/mo + $0.03/10k requests | prorated |
-| DynamoDB (PAY_PER_REQUEST) | ~$0 idle; $1.25/M writes | + PITR ~$0.20/GB-mo |
-| API Gateway REST | $3.50/M calls | |
-| Lambda x6 | free-tier covers demo | in-VPC, 7-day logs |
-| WAFv2 WebACL + 3 rules | $5/mo ACL + $1/rule/mo + $0.60/M req | prorated |
-| AWS Config | $0.003 per config item + rule evals | recorder scoped to SG only |
-| CloudTrail (1st trail) | free for mgmt events; S3 storage only | 14-day expiry |
-| CloudWatch dashboard | $3/mo per dashboard (first 3 free) | |
-| CloudWatch alarms / logs | ~$0.10/alarm-mo + log ingest | 7–14 day retention |
-| CfnBudget | first 2 budgets free | |
+### Free-tier basis for every resource type that could bill at scale (Safety Rule 3)
 
-**Deploy and tear down the same day.** See `TEARDOWN.md`.
+| Resource | Free-tier basis | Permanent? | Demo risk |
+|----------|-----------------|-----------|-----------|
+| **RDS** `db.t4g.micro` single-AZ + 20 GB gp2 | 750 instance-hrs/mo + 20 GB storage + 20 GB backup | **12-month only** ⚠️ | $0 now; a 2nd instance (Act 1 replica) left up all month would exceed 750 hrs |
+| **API Gateway REST** | 1M REST calls/mo | **12-month only** ⚠️ | demo makes ~hundreds of calls → ~$0; structurally not permanent |
+| **DynamoDB** (on-demand) | 25 GB storage always free | storage permanent; **on-demand request pricing has NO always-free allowance** ⚠️ | demo writes/reads ≈ a few thousand → < $0.01; effectively $0, not structurally $0 |
+| **Lambda** ×7 app functions | 1M requests + 400,000 GB-s/mo | **permanent** ✓ | negligible |
+| **EventBridge** rule (5-min schedule) | scheduled rules free; ~8,640 Lambda invokes/mo | **permanent** ✓ | negligible |
+| **SNS** (3 topics) | 1M publishes + 1,000 email notifications/mo | **permanent** ✓ | a few dozen emails |
+| **CloudWatch** dashboard ×1, logs | 3 dashboards + 5 GB logs ingest/storage + 10 alarms (0 used) | **permanent** ✓ | well within |
+| **AWS Budgets** ×1 | first 2 budgets/account | **permanent** ✓ | 1 used |
+| **VPC / subnets / route tables / security groups / RDS subnet group** | always free | **permanent** ✓ | — |
+| **Data transfer out** | 100 GB/mo | **permanent** ✓ | demo traffic tiny; no NAT data-processing charge |
+
+### Items to double-check on the AWS Pricing Calculator before deploy (Safety Rule 4)
+
+1. **RDS 12-month free tier** — confirm this account (created 2026-09-07) still
+   has RDS free-tier eligibility, and that `db.t4g.micro` is free-tier eligible
+   in **ap-south-1** (region matters; it is in most, but verify).
+2. **API Gateway REST 1M-calls free tier is 12-month.** If the account is past
+   12 months at demo time, REST calls are $3.50/M (still ≈ $0 at demo volume).
+3. **DynamoDB on-demand requests are not in any always-free bucket.** If you
+   want structurally-$0 DynamoDB, switch both the table and the rate-limit
+   usage to provisioned 5 RCU / 5 WCU (inside the permanent 25/25 allowance).
+4. **AWS Free Plan account limits.** This account is (or was) on the AWS Free
+   Plan, which blocked Aurora. Standard single-AZ `db.t4g.micro` RDS is the
+   classic free-tier resource and is expected to work, but it may also require
+   the Free Plan's "express configuration" — if `cdk deploy` of DataStack
+   fails with a free-plan message, that is the blocker to report, not a bug.
+
+### Deploy prerequisite from the operator
+
+* `aws ssm put-parameter --name /sentinelcommerce/db-password --type String --value <strong> --region ap-south-1`
+  — **before** `cdk deploy`. DataStack and the two RDS Lambdas both resolve
+  this at deploy time. Nothing else is needed from the operator.
+
+### Safety status
+
+* No `cdk deploy` has been run against the refactored code. Awaiting explicit
+  "deploy now".
+* The earlier (pre-refactor) partial deployment was fully destroyed —
+  `cdk destroy --all` completed; account has no SentinelCommerce resources.

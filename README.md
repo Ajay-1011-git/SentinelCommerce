@@ -1,206 +1,152 @@
-# SentinelCommerce
+# SentinelCommerce (zero-cost edition)
 
 A small order / inventory app whose real purpose is to demonstrate **five
 cloud-architecture capabilities** live, on a real AWS account in
-**ap-south-1 (Mumbai)**:
+**ap-south-1 (Mumbai)** — architected to cost a **genuine $0** to build and
+demo (no payment method on the account; no charge can be risked).
 
-| Act | Capability | Where it lives |
-|-----|------------|----------------|
-| 1 | Aurora database failover | `DataStack` |
-| 2 | Real-time event pipeline (DynamoDB Streams → Lambda → SNS) | `DataStack` + `ComputeStack` |
-| 3 | Blocked web attack (WAFv2 on API Gateway) | `SecurityStack` + `ComputeStack` |
-| 4 | Self-healing governance (AWS Config → custom SSM Automation) | `GovernanceStack` |
-| 5 | Cost / budget discipline | `CostStack` + `ObservabilityStack` |
+| Act | Capability | Mechanism (zero-cost) |
+|-----|------------|-----------------------|
+| 1 | Resilience / disaster recovery | RDS **read-replica promotion** (`promote-read-replica`) — a manual DR action, **not** automatic Multi-AZ HA (that costs). Explained as a deliberate tradeoff. |
+| 2 | Real-time event pipeline | DynamoDB Streams → Lambda → SNS low-stock alert (unchanged) |
+| 3 | Blocked web attack | API Gateway **Lambda REQUEST authorizer** — regex signatures + per-IP DynamoDB rate limit. Same outcome as WAF, $0. |
+| 4 | Self-healing governance | `security_group_watchdog` Lambda on a 5-min EventBridge schedule revokes unrestricted SSH and publishes the fix. Replaces AWS Config + SSM Automation. |
+| 5 | Cost / budget discipline | `CfnBudget` + SNS email — now a *stronger* point: genuinely $0, not "cheap" |
 
-> **This deploys to a real personal AWS account and costs real money.**
-> Nothing is deployed until you explicitly run the deploy step. See
-> [RUNBOOK.md](RUNBOOK.md) to run the demo and [TEARDOWN.md](TEARDOWN.md)
-> to remove everything afterwards.
+> Nothing deploys until you explicitly say **"deploy now."** See
+> [RUNBOOK.md](RUNBOOK.md) for the demo and [TEARDOWN.md](TEARDOWN.md) to
+> remove everything. Free-tier basis for every resource: [AUDIT.md](AUDIT.md).
+
+## Manual step (operator does this once, before `cdk deploy`)
+
+```bash
+aws ssm put-parameter --name /sentinelcommerce/db-password \
+  --type String \
+  --value "$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')" \
+  --region ap-south-1
+```
+
+**Why `String`, not `SecureString`:** the two RDS-facing Lambdas run in
+isolated subnets and can't call the SSM API at runtime without a **paid**
+VPC interface endpoint (~$7/mo) or a NAT gateway. Instead the password is
+injected into their environment **at deploy time** via the CloudFormation
+`{{resolve:ssm:...}}` dynamic reference, which only resolves `String`
+parameters. SSM `String` parameters are $0 — identical to `SecureString`
+for cost — but the value is **not encrypted at rest in SSM** and is visible
+in the Lambda configuration. Acceptable for a throwaway demo DB in an
+isolated subnet. Nothing else is needed from the operator.
 
 ## Stack layout
 
-One CDK App (`app.py`), seven `Stack` classes deployed together with
-`cdk deploy --all`. Narrative / dependency order:
+One CDK App (`app.py`), seven `Stack` classes, `cdk deploy --all`.
+Dependency order CDK resolves:
 
 ```
-NetworkStack → DataStack → SecurityStack → ComputeStack
-   → GovernanceStack → ObservabilityStack → CostStack
+NetworkStack → DataStack → SecurityStack → ComputeStack → ObservabilityStack → CostStack
+GovernanceStack  (independent; ComputeStack depends on it for one SSM parameter)
 ```
-
-CDK resolves the **real** deploy order from cross-stack references. Two AWS
-constraints make the actual order differ slightly from the narrative, and
-both are deliberate design decisions:
-
-* **KMS before data.** `DataStack` encrypts Aurora, DynamoDB and the DB
-  secret with the customer-managed key in `SecurityStack`, so the key is
-  created first. `app.py` builds `SecurityStack` before `DataStack`.
-* **No stack cycles around the CMK / WAF / SGs.** Cross-stack CDK `grant_*`
-  helpers mutate the *granted* resource's policy with a reference back to
-  the grantee, which would create `SecurityStack ⇄ ComputeStack` and
-  `DataStack ⇄ ComputeStack` dependency cycles. So:
-  * every Lambda permission on the CMK, the DB secret, the DynamoDB table
-    and its stream is written as an **explicit least-privilege identity
-    policy** on that function's own role (scoped to one ARN, never `*`);
-  * the Aurora security group opens the DB port to the **VPC CIDR** rather
-    than referencing each Lambda's security group across stacks;
-  * the WAF **WebACL** is built in `SecurityStack` but the **association**
-    to the REST API stage is created in `ComputeStack`.
 
 ## Design decisions & why
 
-### NetworkStack
-* VPC `10.0.0.0/16`, 2 AZs, three subnet tiers: `PUBLIC` (NAT),
-  `PRIVATE_WITH_EGRESS` (Lambdas), `PRIVATE_ISOLATED` (Aurora — **no route
-  to the internet at all**).
-* **Exactly one NAT gateway** (`nat_gateways=1`). NAT gateways bill per
-  hour (~$0.045/hr in ap-south-1) plus data processing regardless of
-  traffic. One NAT is a cost tradeoff appropriate to a time-boxed demo; a
-  single-AZ failure could interrupt Lambda egress, which production would
-  not accept.
+### NetworkStack — $0
+* VPC `10.0.0.0/16`, 2 AZs, **only `PRIVATE_ISOLATED` subnets**.
+* **No NAT gateway** (`nat_gateways=0`) — no free tier, ~$0.045/hr otherwise.
+* **No `PRIVATE_WITH_EGRESS` tier** — it only makes sense with a NAT. Only
+  RDS and the two RDS-facing Lambdas go in the VPC; every other Lambda uses
+  default networking and reaches DynamoDB/SNS/SSM over the public AWS API.
+* VPC, subnets, route tables, security groups: always free.
 
-### DataStack
-* **Aurora PostgreSQL 16**, 1 writer + 1 reader, one instance per AZ. In
-  Aurora the reader **is** both the Multi-AZ failover target **and** the
-  read replica — the same shared-storage mechanism. There is deliberately
-  no separate "read replica" resource. `get_reports` reads the **reader
-  endpoint** explicitly so report traffic never contends with checkout
-  writes on the writer.
-* **Engine = Aurora PostgreSQL, not MySQL** — forced by the target account
-  being on the **AWS Free Plan**, which rejects the Aurora MySQL cluster
-  engine (`Available engine types: [aurora-postgresql]`). The architecture
-  is unchanged; only the SQL dialect and the Lambda driver (`pg8000`
-  instead of `PyMySQL`) differ.
-* **Serverless v2, 0.5–2 ACU** — Aurora has no free-tier/micro instance;
-  Serverless v2 at minimum capacity is the cheapest way to keep a real
-  writer + reader pair (needed for the Act 1 failover demo). Runs only
-  during build/demo windows.
-* Credentials via `from_generated_secret()` → Secrets Manager. No password
-  in code, ever. **Single-user rotation** enabled (30 days) and can be
-  **forced on demand** in the demo to show the old credential fail
-  instantly.
-* **DynamoDB** single table, generic `PK`/`SK`, `PAY_PER_REQUEST`,
-  SSE with the same CMK, Streams `NEW_AND_OLD_IMAGES`.
-  **Point-in-time recovery is ON** — cheap, good practice, and a Module 4
-  data-protection talking point.
+### DataStack — RDS free tier + free DynamoDB
+* **Standard `rds.DatabaseInstance`, MySQL 8.0, `db.t4g.micro`**,
+  `multi_az=False`, `allocated_storage=20`, isolated subnets. Aurora is
+  gone (no free tier; blocked on this account anyway).
+* Storage encrypted with the AWS-managed `aws/rds` key (no monthly fee;
+  KMS requests inside the always-free 20,000/month). **No customer key.**
+* **No `from_generated_secret()`** — that creates a Secrets Manager secret
+  ($0.40/mo). Master password comes from the operator-created SSM `String`
+  parameter (see Manual step).
+* **DynamoDB** single table, `PK`/`SK`, on-demand, **default encryption
+  (AWS-owned key, free)** — not `AWS_MANAGED`, not `CUSTOMER_MANAGED`.
+  Streams `NEW_AND_OLD_IMAGES`, PITR on (free).
+* ⚠️ **The RDS free tier is 12-month, not permanent** (750 hrs/mo of
+  `db.t4g.micro` + 20 GB). $0 for the course; see AUDIT.md. Running the
+  primary **and** the Act 1 read replica for a whole month would exceed
+  750 hrs — delete the replica after the demo.
 
-### SecurityStack
-* **One KMS customer-managed key**, rotation on, alias
-  `alias/sentinelcommerce`. It encrypts Aurora storage, the DynamoDB
-  table, and the Secrets Manager secret — **"one key, three layers"**
-  defense-in-depth: disabling this single key severs access to every data
-  surface at once. The key policy is **not** `"*"` — the default policy
-  grants account-root admin (break-glass) and enables IAM-identity grants;
-  each Lambda role gets a narrow `kms:Decrypt` on this key ARN only.
-* **WAFv2 REGIONAL WebACL**, rules in priority order:
-  1. `AWS-AWSManagedRulesCommonRuleSet`
-  2. `AWS-AWSManagedRulesSQLiRuleSet`
-  3. custom **rate-based rule**: block any single IP over **100 requests /
-     5 min** (100 is WAF's minimum and makes the demo easy to trigger).
-  Default action **Allow**; CloudWatch metrics + sampled requests on the
-  ACL and every rule. Associated to the **REST API** stage (REST + WAF
-  association via `CfnWebACLAssociation` is the most reliable path).
-* **`demo-remediation-target` security group** — attached to **nothing**.
-  It exists only so the governance demo can open port 22 to `0.0.0.0/0` on
-  a group that protects no real resource. The SG guarding Aurora is never
-  touched.
+### SecurityStack — almost empty now
+* KMS CMK: **removed** ($1/mo). WAFv2 WebACL: **removed** ($5/mo + $1/rule).
+* AWS **Shield Standard** protects every account automatically at no cost —
+  nothing to provision.
+* All that remains: the unused **`demo-remediation-target` security group**
+  (Act 4 blast target; attached to nothing; free).
+* The WAF replacement (REQUEST authorizer) lives in **ComputeStack** —
+  putting it here would create a Security↔Compute cycle via the
+  auto-generated API-Gateway→Lambda invoke permission.
 
 ### ComputeStack
-* **REST API Gateway** (regional) + Lambda (Python 3.13) in
-  `PRIVATE_WITH_EGRESS` subnets:
-  * `create_order` → Aurora **writer** endpoint
-  * `get_reports` → Aurora **reader** endpoint (isolates report load)
-  * `get_inventory` / `update_cart` → DynamoDB
-  * `stream_processor` → DynamoDB Streams; on a stock decrement crossing
-    the low-stock threshold (**read from SSM Parameter Store**, not
-    hardcoded) it publishes to `sentinelcommerce-inventory-alerts`.
-* Each function: structured JSON logging, env vars for table / endpoints /
-  secret ARN, **CloudWatch Logs retention 7 days** (cost).
-* `pg8000` (pure-Python PostgreSQL driver) ships as a Lambda **layer** (`layers/pg8000/`).
+* REST API (regional) + Lambdas (Python 3.13):
+  * `create_order` → RDS (isolated subnet); `get_reports` → RDS (isolated).
+    DB password injected at deploy via `{{resolve:ssm:...}}` → **no runtime
+    SSM call, no VPC endpoint, no NAT.**
+  * `get_inventory` / `update_cart` / `stream_processor` → **no VPC**,
+    default networking, DynamoDB/SNS/SSM over the public API.
+* **`request_authorizer`** — API Gateway REQUEST authorizer, the $0 WAF
+  replacement:
+  * regex signatures (SQLi / XSS / command-injection / path traversal)
+    tested against the decoded path + query + headers (API Gateway does
+    **not** pass the body to an authorizer);
+  * per-IP **fixed-window rate limit** (100 req / 5 min) counted in the
+    existing DynamoDB table (`PK="RL#<ip>"`, `SK="WINDOW#<epoch/300>"`,
+    with a TTL so counters self-expire — no second table);
+  * every Deny → CloudWatch log + `sentinelcommerce-alerts` SNS publish.
+* **`security_group_watchdog`** — outside the VPC. EventBridge fires it
+  every 5 min (free); also `aws lambda invoke` on demand. It runs
+  `ec2:DescribeSecurityGroups` on the one demo SG, and if it finds
+  `0.0.0.0/0:22` calls `ec2:RevokeSecurityGroupIngress` then `sns:Publish`.
+  IAM role scoped to exactly those actions on that one SG ARN.
+* Logs retention 7 days; `sentinelcommerce-inventory-alerts` +
+  `sentinelcommerce-alerts` SNS topics.
 
-### GovernanceStack
-* **AWS Config**: recorder (scoped to `AWS::EC2::SecurityGroup` to keep
-  cost down) + delivery channel → a new S3 bucket with a **7-day
-  expiry** lifecycle rule, `auto_delete_objects=True`,
-  `removal_policy=DESTROY`. **Run `scripts/predeploy_check.sh` first** — an
-  account/region may hold only one Config recorder and CloudFormation
-  cannot express that pre-check.
-* **Config rule**: managed rule `INCOMING_SSH_DISABLED` (console name
-  *restricted-ssh*), scoped to the demo security group.
-  ⚠️ **Verify this source identifier against the current AWS Config
-  "List of Managed Rules" docs before deploying** — AWS has renamed rule
-  identifiers before.
-* **Remediation**: a **custom SSM Automation document** we own end to end
-  (rather than guessing at an AWS-managed document name). Steps:
-  1. `aws:executeAwsApi` → `ec2:RevokeSecurityGroupIngress` removing the
-     `0.0.0.0/0:22` rule from the flagged SG (`RESOURCE_ID` from the
-     remediation config);
-  2. `aws:executeAwsApi` → `sns:Publish` logging the fix to
-     `sentinelcommerce-governance-alerts`.
-  Linked to the rule via `RemediationConfiguration`, `automatic=true`.
-* **SSM Parameter Store** holds the low-stock threshold and other small
-  non-secret config.
+### GovernanceStack — Parameter Store only
+* AWS **Config removed** (no free tier). SSM Automation document
+  **removed** (the watchdog Lambda does it in boto3). CloudTrail Trail
+  **not created** — the demo uses the account's built-in, always-free
+  **90-day Event History** (`aws cloudtrail lookup-events`).
+* Keeps the genuine "Systems Manager" component: the
+  `/sentinelcommerce/low-stock-threshold` standard parameter (free).
 
-### ObservabilityStack
-* **CloudWatch dashboard `SentinelCommerce-MissionControl`**: Aurora CPU +
-  connections (writer & reader), DynamoDB consumed capacity, each Lambda's
-  errors + p99 duration, WAF allowed vs blocked, and a Logs Insights
-  widget over the CloudTrail log group showing recent
-  Revoke/Authorize security-group-ingress events (the auto-remediation
-  trail).
-* **CloudTrail**: single trail, **single-region** — fine for this scope
-  (the whole demo is in ap-south-1; a multi-region trail only adds S3
-  cost). Delivers to an S3 bucket (**14-day** expiry,
-  `auto_delete_objects`, `DESTROY`) **and** a CloudWatch Logs group.
-* **Metric filter** `{ $.eventName = "AuthorizeSecurityGroupIngress" }` on
-  that log group → CloudWatch alarm → `sentinelcommerce-alerts` SNS topic.
+### ObservabilityStack — free-tier CloudWatch only
+* One dashboard `SentinelCommerce-MissionControl`: RDS CPU / connections /
+  freeable memory, DynamoDB consumed capacity, each Lambda's errors + p99,
+  the authorizer's block count (Logs Insights) and the watchdog's
+  invocations/errors + a Logs Insights view of its remediation events.
+* CloudTrail metric filter + alarm **removed** (Trail is gone). Zero custom
+  metrics, zero alarms — inside the free tier (3 dashboards, 10 alarms).
 
-### CostStack
-* **`CfnBudget`** monthly cost budget (amount from CDK context, default
-  **$10**), notifications at **80% actual** and **100% forecasted**, each
-  to email **and** an SNS topic (`budgets.amazonaws.com` is granted
-  `SNS:Publish`). This is a second, code-managed layer on top of the
-  manual console budget already set as a safety net.
-* Subscribes the notification email (from CDK context, never hardcoded) to
-  `sentinelcommerce-alerts` and `sentinelcommerce-inventory-alerts`.
+### CostStack — unchanged
+* `CfnBudget` (monthly, default $10 from context), 80% actual / 100%
+  forecast → email + SNS. First 2 budgets/account free.
+* Email subscribed to `sentinelcommerce-alerts` +
+  `sentinelcommerce-inventory-alerts`.
 
-## Tagging & cost traceability
+## Tagging
 
-Every resource in every stack is tagged at the App level with
-`Project=SentinelCommerce` and `Environment=demo` so Cost Explorer /
-Trusted Advisor views stay clean.
-
-## Approximate running cost (build/demo window)
-
-See the plain-English billable-resource list produced after `cdk synth`
-(also summarized in [RUNBOOK.md](RUNBOOK.md)). The dominant line items are
-Aurora (2 × `db.t3.medium`, ~$0.08/hr each + storage), the single NAT
-gateway (~$0.045/hr + data), and AWS Config ($0.003 per config item
-recorded). **Tear down the same day** — nothing here is free-tier.
+App-level `Project=SentinelCommerce` / `Environment=demo` on every resource.
 
 ## Prerequisites
 
-* Dedicated IAM user with admin, configured via `aws configure`
-* AWS CDK v2 CLI, `cdk bootstrap` already run in this account/region
-* Python 3.12+ and a virtualenv:
-  ```
-  python3 -m venv .venv && source .venv/bin/activate
-  pip install -r requirements.txt
-  ```
+* IAM user with the needed permissions, `aws configure` profile
+  `sentinelcommerce-agent`, region ap-south-1.
+* `cdk bootstrap` done. `python3 -m venv .venv && pip install -r requirements.txt`.
+* The Manual step above, before `cdk deploy`.
 
 ## Layout
 
 ```
-app.py                      one CDK App, seven stacks
-cdk.json
-requirements.txt
-stacks/                     network / data / security / compute /
-                            governance / observability / cost
-lambda/                     create_order/ get_reports/ inventory/ stream_processor/
-layers/pg8000/              pure-Python pg8000 (PostgreSQL) Lambda layer
-scripts/
-  predeploy_check.sh        one-Config-recorder safety gate (run before deploy)
-  seed_data.py              demo products + orders
-  demo_check.sh             read-only post-deploy smoke test (all 5 Acts)
-RUNBOOK.md                  exact CLI for each of the 5 demo Acts
-TEARDOWN.md                 cdk destroy + manual cleanup
+app.py  cdk.json  requirements.txt
+stacks/   network / data / security / compute / governance / observability / cost
+lambda/   create_order/ get_reports/ inventory/ stream_processor/ authorizer/ sg_watchdog/
+layers/pymysql/            pure-Python PyMySQL Lambda layer
+scripts/  seed_data.py   demo_check.sh
+RUNBOOK.md  TEARDOWN.md  AUDIT.md
 ```
