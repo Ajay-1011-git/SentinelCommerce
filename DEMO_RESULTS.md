@@ -53,10 +53,17 @@ watchdog log: `{"event": "watchdog_remediated", "auto_remediation": "REVOKED_UNR
 The 5-minute EventBridge schedule also fired on its own (`watchdog_clean`
 entries) — both on-demand and scheduled paths verified.
 
-### Act 1 — resilience (manual DR) ✓ (see RUNBOOK)
-Read replica `sentinelcommerce-replica` created from the primary, then
-`promote-read-replica` → standalone primary. (Manual DR, not automatic
-Multi-AZ HA — deliberate $0 tradeoff, explained live.)
+### Act 1 — resilience / manual DR ✓
+```
+BEFORE:  status=available  ReadReplicaSource=sentinelcommerce-datastack-sentineldbcd10063e-...
+$ aws rds promote-read-replica --db-instance-identifier sentinelcommerce-replica
+AFTER:   status=available  ReadReplicaSource=None          # standalone primary
+```
+`get_reports` env repointed at the promoted endpoint → `GET /reports` still
+returns `[{sku:SC-MOUSE-02, orders:1, units:2}, {sku:SC-KEYB-01, orders:1, units:1}]`
+(data that replicated from the original primary before promotion).
+Manual DR, **not** automatic Multi-AZ HA — the deliberate $0 tradeoff,
+stated live.
 
 ### Act 5 — cost / budget ✓
 `SentinelCommerce-Monthly` budget = $10 USD, 80% actual / 100% forecast.
