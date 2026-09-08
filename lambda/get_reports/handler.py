@@ -1,43 +1,35 @@
-"""get_reports - reads order aggregates from Aurora PostgreSQL via the READER endpoint.
+"""get_reports - order aggregates from RDS MySQL.
 
-Reports deliberately hit the reader endpoint, NOT the writer: analytical
-/ reporting queries are isolated from live checkout traffic so a slow
-report can never contend with order writes on the writer instance.
+In the $0 design there is only one RDS instance; when a read replica is
+promoted for the Act 1 resilience demo it becomes a standalone primary and
+this function is repointed at it (env var updated by the RUNBOOK step).
+Reports still run on a connection separate from checkout writes.
 """
 import json
 import logging
 import os
-import ssl
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-READER_ENDPOINT = os.environ["DB_READER_ENDPOINT"]
-SECRET_ARN = os.environ["DB_SECRET_ARN"]
+DB_HOST = os.environ["DB_READER_ENDPOINT"]
+DB_PORT = int(os.environ.get("DB_PORT", "3306"))
+DB_USER = os.environ["DB_USER"]
+DB_PASSWORD = os.environ["DB_PASSWORD"]
 DB_NAME = os.environ.get("DB_NAME", "sentinelcommerce")
 
 
 def handler(event, context):
-    import boto3
-    import pg8000.dbapi
+    import pymysql
 
     try:
-        secret = json.loads(
-            boto3.client("secretsmanager").get_secret_value(SecretId=SECRET_ARN)[
-                "SecretString"
-            ]
-        )
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        conn = pg8000.dbapi.connect(
-            host=READER_ENDPOINT,
-            port=int(secret.get("port", 5432)),
-            user=secret["username"],
-            password=secret["password"],
+        conn = pymysql.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
             database=DB_NAME,
-            ssl_context=ctx,
-            timeout=5,
+            connect_timeout=5,
         )
         with conn.cursor() as cur:
             cur.execute(

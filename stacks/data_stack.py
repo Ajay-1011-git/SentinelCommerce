@@ -1,22 +1,51 @@
-"""DataStack - Aurora PostgreSQL cluster and the DynamoDB single table.
+"""DataStack - a free-tier RDS instance + the DynamoDB single table.
 
-Module 1 (database failover) and Module 2 (real-time event pipeline)
-originate here.
+Zero-cost refactor:
+  * Aurora is GONE. Aurora has no free tier at any scale and (on this
+    account) is blocked outright. Replaced with a standard
+    `rds.DatabaseInstance`, MySQL, `db.t4g.micro` (smallest burstable
+    Graviton class, free-tier eligible), `multi_az=False`,
+    `allocated_storage=20` (inside the 20 GB free storage allowance),
+    in the isolated subnets.
+  * No customer-managed KMS key. Storage encryption uses the AWS-managed
+    `aws/rds` key (no monthly charge; KMS requests stay inside the
+    always-free 20,000/month allowance).
+  * No `Credentials.from_generated_secret()` - that always creates a
+    Secrets Manager secret ($0.40/mo). The master password comes from a
+    pre-existing SSM Parameter Store parameter that the operator creates
+    by hand before this stack is deployed (see RUNBOOK / README "manual
+    step"). See the note below on String vs SecureString.
+  * DynamoDB: unchanged design, encryption left at the default
+    (AWS-owned key, free) - NOT AWS_MANAGED or CUSTOMER_MANAGED.
 
-NOTE - engine choice: the target account is on the **AWS Free Plan**, which
-blocks the Aurora MySQL cluster engine entirely ("The specified cluster
-engine type is not available with free plan accounts. Available engine
-types: [aurora-postgresql]"). The architecture is identical with Aurora
-PostgreSQL - writer + reader on shared storage, the reader doubling as the
-Multi-AZ failover target and the read replica - so we use aurora-postgresql
-with Serverless v2 instances (lowest cost, still a real failover target).
+FREE-TIER CAVEAT (flagged per the project's safety rules): the RDS free
+tier (750 hrs/mo of db.t4g.micro single-AZ + 20 GB) is a **12-month**
+promotional tier, not a permanent one. It is $0 for the duration of this
+course, but verify the account's free-tier status / the AWS Pricing
+Calculator before a long-lived deploy. Running the primary AND a read
+replica together for a whole month would also exceed the 750 hrs.
+
+PASSWORD PARAMETER - String, not SecureString: the two RDS-facing Lambdas
+run in the isolated subnets and cannot call the SSM API at runtime
+without a paid VPC interface endpoint or a NAT gateway. Instead the
+password is injected into their environment at *deploy* time via the
+CloudFormation `{{resolve:ssm:...}}` dynamic reference, which only works
+for `String` parameters. SSM `String` parameters are $0, exactly like
+`SecureString` - the cost goal is met - but the value is not encrypted at
+rest in SSM and is visible in the Lambda configuration. Acceptable for a
+throwaway demo database in an isolated subnet; flip to IAM database
+auth if that tradeoff matters.
 """
-from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import CfnOutput, Duration, RemovalPolicy, SecretValue, Stack
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_ec2 as ec2
-from aws_cdk import aws_kms as kms
 from aws_cdk import aws_rds as rds
+from aws_cdk import aws_ssm as ssm
 from constructs import Construct
+
+DB_PASSWORD_PARAM = "/sentinelcommerce/db-password"
+DB_USERNAME = "dbadmin"
+DB_NAME = "sentinelcommerce"
 
 
 class DataStack(Stack):
@@ -26,76 +55,53 @@ class DataStack(Stack):
         construct_id: str,
         *,
         vpc: ec2.IVpc,
-        kms_key: kms.IKey,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # --- Aurora PostgreSQL-Compatible ------------------------------
-        # 1 writer + 1 reader, one instance per AZ. In Aurora the reader IS
-        # both the Multi-AZ failover target AND the read replica - the same
-        # mechanism serves both. There is deliberately no separate "read
-        # replica" resource: promoting the reader on writer failure and
-        # serving report reads from it are the same shared-storage feature.
-        engine = rds.DatabaseClusterEngine.aurora_postgres(
-            version=rds.AuroraPostgresEngineVersion.VER_16_6
+        # Master password: plaintext SSM String dynamic reference. Resolves
+        # at deploy time both here and in the Lambda env vars (ComputeStack).
+        db_password = ssm.StringParameter.value_for_string_parameter(
+            self, DB_PASSWORD_PARAM
         )
 
-        # Serverless v2, 0.5-2 ACU. Aurora has no free-tier/micro instance;
-        # Serverless v2 at min capacity is the cheapest way to keep a real
-        # writer + reader pair (needed for the Act 1 failover demo) running
-        # only during build/demo windows. Torn down after.
-        instance_kwargs = dict(publicly_accessible=False)
-
-        self.aurora_cluster = rds.DatabaseCluster(
+        self.db_instance = rds.DatabaseInstance(
             self,
-            "AuroraCluster",
-            engine=engine,
+            "SentinelDb",
+            engine=rds.DatabaseInstanceEngine.mysql(
+                version=rds.MysqlEngineVersion.VER_8_0_39
+            ),
+            instance_type=ec2.InstanceType.of(
+                ec2.InstanceClass.BURSTABLE4_GRAVITON, ec2.InstanceSize.MICRO
+            ),  # db.t4g.micro - free-tier eligible
             vpc=vpc,
-            serverless_v2_min_capacity=0.5,
-            serverless_v2_max_capacity=2,
-            # Isolated subnets: the database has no route to the internet.
             vpc_subnets=ec2.SubnetSelection(
                 subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
             ),
-            writer=rds.ClusterInstance.serverless_v2("writer", **instance_kwargs),
-            readers=[
-                # scale_with_writer -> promotion tier 0/1, so this reader is a
-                # first-class Multi-AZ failover target (Act 1).
-                rds.ClusterInstance.serverless_v2(
-                    "reader", scale_with_writer=True, **instance_kwargs
-                )
-            ],
-            storage_encrypted=True,
-            storage_encryption_key=kms_key,
-            # from_generated_secret(): password is generated and stored in
-            # Secrets Manager automatically. No password appears in code.
-            credentials=rds.Credentials.from_generated_secret(
-                "sentineladmin", encryption_key=kms_key
+            multi_az=False,  # $0: single-AZ (Act 1 uses a manual read replica)
+            allocated_storage=20,  # inside the 20 GB free allowance
+            max_allocated_storage=None,  # no storage autoscaling
+            storage_type=rds.StorageType.GP2,
+            storage_encrypted=True,  # AWS-managed aws/rds key, no custom CMK
+            credentials=rds.Credentials.from_password(
+                DB_USERNAME,
+                # SecretValue wrapping the {{resolve:ssm:...}} deploy-time token.
+                SecretValue.unsafe_plain_text(db_password),
             ),
-            default_database_name="sentinelcommerce",
-            backup=rds.BackupProps(retention=Duration.days(1)),
+            database_name=DB_NAME,
+            backup_retention=Duration.days(0),  # $0: no automated backups
+            delete_automated_backups=True,
+            deletion_protection=False,
             removal_policy=RemovalPolicy.DESTROY,  # demo - not production
+            publicly_accessible=False,
+            cloudwatch_logs_exports=[],  # $0: no log exports
         )
 
-        self.aurora_secret = self.aurora_cluster.secret
-
-        # Allow the app Lambdas (which run in this VPC's PRIVATE_WITH_EGRESS
-        # subnets) to reach the DB port. We open it to the VPC CIDR here
-        # rather than referencing each Lambda's security group from
-        # ComputeStack - a cross-stack SG reference would create a
-        # Data<->Compute dependency cycle. Nothing outside the VPC can route
-        # to the isolated subnets regardless.
-        self.aurora_cluster.connections.allow_default_port_from(
-            ec2.Peer.ipv4(vpc.vpc_cidr_block), "App Lambdas in private subnets"
-        )
-
-        # Single-user rotation helper. Rotates every 30 days automatically;
-        # a rotation can ALSO be forced on demand
-        # (`aws secretsmanager rotate-secret`) - used live to show the old
-        # credential fail immediately. See RUNBOOK.md.
-        self.aurora_cluster.add_rotation_single_user(
-            automatically_after=Duration.days(30)
+        # Lambdas in the isolated subnets connect over the VPC CIDR - no
+        # cross-stack security-group reference (would create a dependency
+        # cycle). Nothing outside the VPC can route here anyway.
+        self.db_instance.connections.allow_default_port_from(
+            ec2.Peer.ipv4(vpc.vpc_cidr_block), "RDS-facing Lambdas"
         )
 
         # --- DynamoDB single table ------------------------------------
@@ -109,29 +115,19 @@ class DataStack(Stack):
                 name="SK", type=dynamodb.AttributeType.STRING
             ),
             billing=dynamodb.Billing.on_demand(),  # PAY_PER_REQUEST
-            # Same CMK as Aurora and the DB secret - "one key, three layers".
-            encryption=dynamodb.TableEncryptionV2.customer_managed_key(kms_key),
+            # Default encryption = AWS-owned key = free. NOT aws_managed()
+            # (that key costs) and NOT customer_managed_key().
             dynamo_stream=dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
-            # PITR: cheap, and a Module 4 (governance / data protection)
-            # talking point in the README.
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
                 point_in_time_recovery_enabled=True
             ),
-            removal_policy=RemovalPolicy.DESTROY,  # demo - not production
+            removal_policy=RemovalPolicy.DESTROY,
         )
 
+        self.db_endpoint = self.db_instance.db_instance_endpoint_address
+        self.db_port = self.db_instance.db_instance_endpoint_port
+
+        CfnOutput(self, "DbEndpoint", value=self.db_endpoint)
+        CfnOutput(self, "DbPort", value=self.db_port)
+        CfnOutput(self, "DbInstanceId", value=self.db_instance.instance_identifier)
         CfnOutput(self, "TableName", value=self.dynamo_table.table_name)
-        CfnOutput(
-            self, "AuroraClusterId", value=self.aurora_cluster.cluster_identifier
-        )
-        CfnOutput(self, "AuroraSecretArn", value=self.aurora_secret.secret_arn)
-        CfnOutput(
-            self,
-            "AuroraWriterEndpoint",
-            value=self.aurora_cluster.cluster_endpoint.hostname,
-        )
-        CfnOutput(
-            self,
-            "AuroraReaderEndpoint",
-            value=self.aurora_cluster.cluster_read_endpoint.hostname,
-        )

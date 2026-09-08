@@ -1,19 +1,22 @@
-"""create_order - writes an order to Aurora PostgreSQL via the WRITER endpoint.
+"""create_order - writes an order to RDS MySQL via the primary endpoint.
 
-Structured JSON logging only. DB credentials are pulled from Secrets
-Manager at runtime - nothing sensitive is in the environment.
+Runs in the isolated subnets (talks only to RDS). The DB password is
+injected into the environment at deploy time from the SSM parameter
+`/sentinelcommerce/db-password` - no runtime SSM call, so no VPC endpoint
+and no NAT gateway are needed.
 """
 import json
 import logging
 import os
-import ssl
 import uuid
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-WRITER_ENDPOINT = os.environ["DB_WRITER_ENDPOINT"]
-SECRET_ARN = os.environ["DB_SECRET_ARN"]
+DB_HOST = os.environ["DB_ENDPOINT"]
+DB_PORT = int(os.environ.get("DB_PORT", "3306"))
+DB_USER = os.environ["DB_USER"]
+DB_PASSWORD = os.environ["DB_PASSWORD"]
 DB_NAME = os.environ.get("DB_NAME", "sentinelcommerce")
 
 
@@ -22,27 +25,15 @@ def _log(event_name, **fields):
 
 
 def _connect():
-    import boto3
-    import pg8000.dbapi
+    import pymysql
 
-    secret = json.loads(
-        boto3.client("secretsmanager").get_secret_value(SecretId=SECRET_ARN)[
-            "SecretString"
-        ]
-    )
-    # In-VPC isolated traffic; use TLS but skip cert-chain verification so we
-    # don't have to ship the RDS CA bundle in the Lambda package.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return pg8000.dbapi.connect(
-        host=WRITER_ENDPOINT,
-        port=int(secret.get("port", 5432)),
-        user=secret["username"],
-        password=secret["password"],
+    return pymysql.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
         database=DB_NAME,
-        ssl_context=ctx,
-        timeout=5,
+        connect_timeout=5,
     )
 
 
@@ -67,6 +58,6 @@ def handler(event, context):
         conn.close()
         _log("order_created", order_id=order_id, sku=sku, qty=qty)
         return {"statusCode": 201, "body": json.dumps({"order_id": order_id})}
-    except Exception as exc:  # noqa: BLE001 - surface failure to caller + logs
+    except Exception as exc:  # noqa: BLE001
         _log("order_failed", error=str(exc))
         return {"statusCode": 500, "body": json.dumps({"error": "order failed"})}
