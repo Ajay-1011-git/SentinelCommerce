@@ -78,8 +78,19 @@ for which tiers are permanent vs 12-month.
 | `fix(data): pin MySQL engine to 8.0.43` | `8.0.39` is not offered in ap-south-1 |
 | `fix(data): enable 1-day automated backups` | read replicas require automated backups; still $0 (free-tier backup storage) |
 
-## Teardown
+## Teardown — completed, account clean
 
-`cdk destroy --all --force` + delete `sentinelcommerce-replica` +
-`aws ssm delete-parameter --name /sentinelcommerce/db-password`. See
-[TEARDOWN.md](TEARDOWN.md).
+```
+cdk destroy --all --force          -> all 7 stacks destroyed
+aws rds delete-db-instance sentinelcommerce-replica --skip-final-snapshot
+aws ssm delete-parameter /sentinelcommerce/db-password
++ deleted 10 residual CloudWatch log groups
+```
+
+Post-teardown verification (all NONE):
+RDS instances · RDS automated backups · non-default VPCs · NAT gateways ·
+SentinelCommerce SSM params · SNS topics · Budgets · EventBridge rules ·
+log groups · tagged security groups.
+
+Only `CDKToolkit` (the CDK bootstrap stack — one S3 bucket, effectively
+free) is retained for future deploys. **Running cost now: $0.**
