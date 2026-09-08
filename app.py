@@ -48,7 +48,7 @@ region = ctx("region", None) or os.environ.get("CDK_DEFAULT_REGION") or "ap-sout
 account = os.environ.get("CDK_DEFAULT_ACCOUNT")
 env = cdk.Environment(account=account, region=region)
 
-notification_email = ctx("notification_email", "vjunk29@gmail.com")
+notification_email = ctx("notification_email", "ajaym556677@gmail.com")
 budget_amount = float(ctx("budget_amount", "10"))
 
 common = dict(env=env)

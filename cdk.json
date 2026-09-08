@@ -14,7 +14,7 @@
   },
   "context": {
     "sentinelcommerce:region": "ap-south-1",
-    "sentinelcommerce:notification_email": "vjunk29@gmail.com",
+    "sentinelcommerce:notification_email": "ajaym556677@gmail.com",
     "sentinelcommerce:budget_amount": "10",
     "@aws-cdk/aws-iam:standardizedServicePrincipals": true,
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
