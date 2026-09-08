@@ -69,7 +69,9 @@ class DataStack(Stack):
             self,
             "SentinelDb",
             engine=rds.DatabaseInstanceEngine.mysql(
-                version=rds.MysqlEngineVersion.VER_8_0_39
+                # Pinned to a version RDS currently offers in ap-south-1
+                # (see `aws rds describe-db-engine-versions --engine mysql`).
+                version=rds.MysqlEngineVersion.of("8.0.43", "8.0")
             ),
             instance_type=ec2.InstanceType.of(
                 ec2.InstanceClass.BURSTABLE4_GRAVITON, ec2.InstanceSize.MICRO
