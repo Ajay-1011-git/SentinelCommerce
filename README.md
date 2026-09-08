@@ -59,15 +59,21 @@ both are deliberate design decisions:
   not accept.
 
 ### DataStack
-* **Aurora MySQL 3.x**, 1 writer + 1 reader, one instance per AZ. In Aurora
-  the reader **is** both the Multi-AZ failover target **and** the read
-  replica — the same shared-storage mechanism. There is deliberately no
-  separate "read replica" resource. `get_reports` reads the **reader
+* **Aurora PostgreSQL 16**, 1 writer + 1 reader, one instance per AZ. In
+  Aurora the reader **is** both the Multi-AZ failover target **and** the
+  read replica — the same shared-storage mechanism. There is deliberately
+  no separate "read replica" resource. `get_reports` reads the **reader
   endpoint** explicitly so report traffic never contends with checkout
   writes on the writer.
-* Instance class `db.t3.medium` — Aurora has **no free-tier / micro**
-  option (unlike standard RDS), so the cluster only runs during
-  build/demo windows.
+* **Engine = Aurora PostgreSQL, not MySQL** — forced by the target account
+  being on the **AWS Free Plan**, which rejects the Aurora MySQL cluster
+  engine (`Available engine types: [aurora-postgresql]`). The architecture
+  is unchanged; only the SQL dialect and the Lambda driver (`pg8000`
+  instead of `PyMySQL`) differ.
+* **Serverless v2, 0.5–2 ACU** — Aurora has no free-tier/micro instance;
+  Serverless v2 at minimum capacity is the cheapest way to keep a real
+  writer + reader pair (needed for the Act 1 failover demo). Runs only
+  during build/demo windows.
 * Credentials via `from_generated_secret()` → Secrets Manager. No password
   in code, ever. **Single-user rotation** enabled (30 days) and can be
   **forced on demand** in the demo to show the old credential fail
@@ -109,7 +115,7 @@ both are deliberate design decisions:
     hardcoded) it publishes to `sentinelcommerce-inventory-alerts`.
 * Each function: structured JSON logging, env vars for table / endpoints /
   secret ARN, **CloudWatch Logs retention 7 days** (cost).
-* `PyMySQL` (pure-Python) ships as a Lambda **layer** (`layers/pymysql/`).
+* `pg8000` (pure-Python PostgreSQL driver) ships as a Lambda **layer** (`layers/pg8000/`).
 
 ### GovernanceStack
 * **AWS Config**: recorder (scoped to `AWS::EC2::SecurityGroup` to keep
@@ -190,7 +196,7 @@ requirements.txt
 stacks/                     network / data / security / compute /
                             governance / observability / cost
 lambda/                     create_order/ get_reports/ inventory/ stream_processor/
-layers/pymysql/             pure-Python PyMySQL Lambda layer
+layers/pg8000/              pure-Python pg8000 (PostgreSQL) Lambda layer
 scripts/
   predeploy_check.sh        one-Config-recorder safety gate (run before deploy)
   seed_data.py              demo products + orders

@@ -1,4 +1,4 @@
-"""create_order - writes an order to Aurora via the WRITER endpoint.
+"""create_order - writes an order to Aurora PostgreSQL via the WRITER endpoint.
 
 Structured JSON logging only. DB credentials are pulled from Secrets
 Manager at runtime - nothing sensitive is in the environment.
@@ -6,6 +6,7 @@ Manager at runtime - nothing sensitive is in the environment.
 import json
 import logging
 import os
+import ssl
 import uuid
 
 logger = logging.getLogger()
@@ -22,19 +23,26 @@ def _log(event_name, **fields):
 
 def _connect():
     import boto3
-    import pymysql
+    import pg8000.dbapi
 
     secret = json.loads(
         boto3.client("secretsmanager").get_secret_value(SecretId=SECRET_ARN)[
             "SecretString"
         ]
     )
-    return pymysql.connect(
+    # In-VPC isolated traffic; use TLS but skip cert-chain verification so we
+    # don't have to ship the RDS CA bundle in the Lambda package.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return pg8000.dbapi.connect(
         host=WRITER_ENDPOINT,
+        port=int(secret.get("port", 5432)),
         user=secret["username"],
         password=secret["password"],
         database=DB_NAME,
-        connect_timeout=5,
+        ssl_context=ctx,
+        timeout=5,
     )
 
 

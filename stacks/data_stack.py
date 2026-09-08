@@ -1,7 +1,15 @@
-"""DataStack - Aurora MySQL cluster and the DynamoDB single table.
+"""DataStack - Aurora PostgreSQL cluster and the DynamoDB single table.
 
 Module 1 (database failover) and Module 2 (real-time event pipeline)
 originate here.
+
+NOTE - engine choice: the target account is on the **AWS Free Plan**, which
+blocks the Aurora MySQL cluster engine entirely ("The specified cluster
+engine type is not available with free plan accounts. Available engine
+types: [aurora-postgresql]"). The architecture is identical with Aurora
+PostgreSQL - writer + reader on shared storage, the reader doubling as the
+Multi-AZ failover target and the read replica - so we use aurora-postgresql
+with Serverless v2 instances (lowest cost, still a real failover target).
 """
 from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_dynamodb as dynamodb
@@ -23,38 +31,40 @@ class DataStack(Stack):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # --- Aurora MySQL-Compatible ------------------------------------
+        # --- Aurora PostgreSQL-Compatible ------------------------------
         # 1 writer + 1 reader, one instance per AZ. In Aurora the reader IS
         # both the Multi-AZ failover target AND the read replica - the same
         # mechanism serves both. There is deliberately no separate "read
         # replica" resource: promoting the reader on writer failure and
         # serving report reads from it are the same shared-storage feature.
-        engine = rds.DatabaseClusterEngine.aurora_mysql(
-            version=rds.AuroraMysqlEngineVersion.VER_3_08_2  # latest 3.x line
+        engine = rds.DatabaseClusterEngine.aurora_postgres(
+            version=rds.AuroraPostgresEngineVersion.VER_16_6
         )
 
-        # Aurora has NO free-tier / db.t*.micro option (unlike standard RDS).
-        # db.t3.medium is the smallest provisioned class it supports, so this
-        # cluster only runs during build/demo windows and is torn down after.
-        instance_kwargs = dict(
-            instance_type=ec2.InstanceType.of(
-                ec2.InstanceClass.T3, ec2.InstanceSize.MEDIUM
-            ),
-            publicly_accessible=False,
-        )
+        # Serverless v2, 0.5-2 ACU. Aurora has no free-tier/micro instance;
+        # Serverless v2 at min capacity is the cheapest way to keep a real
+        # writer + reader pair (needed for the Act 1 failover demo) running
+        # only during build/demo windows. Torn down after.
+        instance_kwargs = dict(publicly_accessible=False)
 
         self.aurora_cluster = rds.DatabaseCluster(
             self,
             "AuroraCluster",
             engine=engine,
             vpc=vpc,
+            serverless_v2_min_capacity=0.5,
+            serverless_v2_max_capacity=2,
             # Isolated subnets: the database has no route to the internet.
             vpc_subnets=ec2.SubnetSelection(
                 subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
             ),
-            writer=rds.ClusterInstance.provisioned("writer", **instance_kwargs),
+            writer=rds.ClusterInstance.serverless_v2("writer", **instance_kwargs),
             readers=[
-                rds.ClusterInstance.provisioned("reader", **instance_kwargs)
+                # scale_with_writer -> promotion tier 0/1, so this reader is a
+                # first-class Multi-AZ failover target (Act 1).
+                rds.ClusterInstance.serverless_v2(
+                    "reader", scale_with_writer=True, **instance_kwargs
+                )
             ],
             storage_encrypted=True,
             storage_encryption_key=kms_key,

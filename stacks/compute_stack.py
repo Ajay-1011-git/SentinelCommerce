@@ -62,12 +62,12 @@ class ComputeStack(Stack):
             topic_name="sentinelcommerce-inventory-alerts",
         )
 
-        pymysql_layer = lambda_.LayerVersion(
+        pg_layer = lambda_.LayerVersion(
             self,
-            "PyMySqlLayer",
-            code=lambda_.Code.from_asset(os.path.join(LAYER_ROOT, "pymysql")),
+            "Pg8000Layer",
+            code=lambda_.Code.from_asset(os.path.join(LAYER_ROOT, "pg8000")),
             compatible_runtimes=[RUNTIME],
-            description="Pure-Python PyMySQL for the Aurora-facing Lambdas",
+            description="Pure-Python pg8000 PostgreSQL driver for the Aurora-facing Lambdas",
         )
 
         vpc_subnets = ec2.SubnetSelection(
@@ -116,11 +116,11 @@ class ComputeStack(Stack):
         # --- Aurora-facing Lambdas ------------------------------------
         create_order = make_fn(
             "create-order", "create_order", "handler.handler",
-            env=db_env, layers=[pymysql_layer],
+            env=db_env, layers=[pg_layer],
         )
         get_reports = make_fn(
             "get-reports", "get_reports", "handler.handler",
-            env=db_env, layers=[pymysql_layer],
+            env=db_env, layers=[pg_layer],
         )
         for fn in (create_order, get_reports):
             allow(fn, ["secretsmanager:GetSecretValue"], [aurora_secret.secret_arn])

@@ -34,7 +34,7 @@ per Safety Rule 1, that waits for an explicit "deploy now".
 
 | Resource | Approx cost (ap-south-1) | Notes |
 |----------|--------------------------|-------|
-| Aurora MySQL 2 × `db.t3.medium` | ~$0.08/hr each (~$0.16/hr) | no free tier; dominant cost |
+| Aurora PostgreSQL Serverless v2, writer+reader | ~$0.12/ACU-hr; 0.5 ACU min → ~$0.06/hr each idle | Free Plan blocks Aurora MySQL; engine switched to aurora-postgresql |
 | Aurora storage + I/O | ~$0.10/GB-mo + I/O | small for demo data |
 | NAT Gateway x1 | ~$0.045/hr + $0.045/GB | single NAT by design |
 | Secrets Manager secret x1 | ~$0.40/mo + $0.05/10k API calls | |
