@@ -1,0 +1,33 @@
+{
+  "SentinelCommerce-NetworkStack": {
+    "ExportsOutputRefSentinelVpc20CC9F87DCCFE259": "vpc-0966307fd080a1feb",
+    "ExportsOutputRefSentinelVpcPrivateIsolatedSubnet1SubnetBFC85FDDE8E337B5": "subnet-0fb32455550c3dc43",
+    "ExportsOutputRefSentinelVpcPrivateIsolatedSubnet2Subnet3A96DAE1E0BE5576": "subnet-0bd6c5e3bf310c68a",
+    "ExportsOutputFnGetAttSentinelVpc20CC9F87CidrBlockB2765269": "10.0.0.0/16"
+  },
+  "SentinelCommerce-SecurityStack": {
+    "ExportsOutputFnGetAttDemoRemediationTargetSg812E46D3GroupId2E3CF81A": "sg-0e2c5559d5cd9834e"
+  },
+  "SentinelCommerce-DataStack": {
+    "TableName": "SentinelCommerce-DataStack-SentinelTable15FE6C31-YFBAY1REGQ94",
+    "DbEndpoint": "sentinelcommerce-datastack-sentineldbcd10063e-h1wfi4brjjdc.c7scy4s22jey.ap-south-1.rds.amazonaws.com",
+    "ExportsOutputFnGetAttSentinelDbCD10063EEndpointPort3BADEBF4": "3306",
+    "ExportsOutputRefSentinelDbCD10063EB36E8AEE": "sentinelcommerce-datastack-sentineldbcd10063e-h1wfi4brjjdc",
+    "ExportsOutputFnGetAttSentinelTable15FE6C31StreamArn70267F8C": "arn:aws:dynamodb:ap-south-1:292759875802:table/SentinelCommerce-DataStack-SentinelTable15FE6C31-YFBAY1REGQ94/stream/2026-09-08T04:41:09.926",
+    "DbPort": "3306",
+    "ExportsOutputFnGetAttSentinelTable15FE6C31Arn8BFF5A93": "arn:aws:dynamodb:ap-south-1:292759875802:table/SentinelCommerce-DataStack-SentinelTable15FE6C31-YFBAY1REGQ94",
+    "DbInstanceId": "sentinelcommerce-datastack-sentineldbcd10063e-h1wfi4brjjdc",
+    "ExportsOutputRefSentinelTable15FE6C31273ED0D7": "SentinelCommerce-DataStack-SentinelTable15FE6C31-YFBAY1REGQ94",
+    "ExportsOutputFnGetAttSentinelDbCD10063EEndpointAddress1EA923BB": "sentinelcommerce-datastack-sentineldbcd10063e-h1wfi4brjjdc.c7scy4s22jey.ap-south-1.rds.amazonaws.com"
+  },
+  "SentinelCommerce-ComputeStack": {
+    "SentinelApiEndpoint997B0C6C": "https://jr6j0jt9y6.execute-api.ap-south-1.amazonaws.com/prod/",
+    "ExportsOutputRefupdatecart8CD6FC3D721A99BC": "sentinelcommerce-update-cart",
+    "ExportsOutputRefcreateorder5D3C035774DD83CA": "sentinelcommerce-create-order",
+    "ExportsOutputRefstreamprocessor64B9B427F3D70E2F": "sentinelcommerce-stream-processor",
+    "ExportsOutputRefRequestAuthorizerFn099E968BDCE9F488": "sentinelcommerce-request-authorizer",
+    "ExportsOutputRefgetreports125D75EC4FF7104E": "sentinelcommerce-get-reports",
+    "ExportsOutputRefgetinventory6BD0C7B39E665347": "sentinelcommerce-get-inventory",
+    "ExportsOutputRefsecuritygroupwatchdog51671153FE080C6E": "sentinelcommerce-security-group-watchdog"
+  }
+}

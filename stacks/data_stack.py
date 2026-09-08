@@ -91,7 +91,10 @@ class DataStack(Stack):
                 SecretValue.unsafe_plain_text(db_password),
             ),
             database_name=DB_NAME,
-            backup_retention=Duration.days(0),  # $0: no automated backups
+            # 1-day automated backups: required for the Act 1 read-replica
+            # promotion demo, and still $0 - RDS free tier includes backup
+            # storage up to 100% of provisioned storage (20 GB here).
+            backup_retention=Duration.days(1),
             delete_automated_backups=True,
             deletion_protection=False,
             removal_policy=RemovalPolicy.DESTROY,  # demo - not production
