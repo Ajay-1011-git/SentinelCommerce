@@ -308,6 +308,21 @@ Inbound rules → **Refresh**:
 > history rather than creating a Trail, because a Trail writes to S3 and that storage
 > isn't free."
 
+**⭐ The strongest single moment in the whole demo — point at the `User` column:**
+
+```
+AuthorizeSecurityGroupIngress  08:07:42  Ajay
+RevokeSecurityGroupIngress     08:07:43  sentinelcommerce-security-group-watchdog
+```
+
+> "Look at the identity column. The dangerous rule was created by *me* — the human —
+> at 08:07:42. It was revoked one second later by the watchdog Lambda's own execution
+> role. Two different identities, independently recorded by AWS, not by my code. That's
+> the audit trail a security reviewer would actually ask for."
+
+*(Verified working this morning — the events appeared within seconds, not the usual
+5–15 minute lag. If today it lags, fall back to the Lambda log and return later.)*
+
 > ⚠️ **CloudTrail lags 5–15 minutes.** If the Revoke event isn't there yet, say exactly
 > that — *"CloudTrail batches events, so this usually shows up within a few minutes;
 > the Lambda's own log already shows it"* — and move on. Come back to this tab later.
