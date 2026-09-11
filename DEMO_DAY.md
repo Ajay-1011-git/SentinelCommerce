@@ -137,6 +137,8 @@ Deployed **2026-09-11**, account `292759875802`, region `ap-south-1`.
 | CloudWatch dashboard | `SentinelCommerce-MissionControl` |
 | Budget | `SentinelCommerce-Monthly` ($10) |
 
+**Pre-demo smoke test: `== ALL CHECKS PASSED ==` (11/11).**
+
 **Rehearsal results from this morning — all verified working:**
 
 | Act | Verified result |
@@ -146,7 +148,7 @@ Deployed **2026-09-11**, account `292759875802`, region `ap-south-1`.
 | 3b | burst of 40 → **24× 200, 16× 403**, counter 1 → 41, `rate_limit:41/25` logged |
 | 4 | SSH opened → watchdog returned `{"revoked": 1}` → rules back to `[]` |
 | 5 | budget $10 MONTHLY, month-to-date spend **$0.00** |
-| 1 | *not rehearsed — irreversible, saved for the live demo* |
+| 1 | replica `available` and replicating — **Act 1 ready**. *Not rehearsed: irreversible, saved for the live demo.* |
 
 ---
 
