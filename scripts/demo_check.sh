@@ -10,20 +10,39 @@ fail() { echo "  FAIL  $1"; FAIL=1; }
 
 echo "== SentinelCommerce demo_check (region: $REGION) =="
 
-# --- Act 1: RDS instance available -----------------------------------
-echo "[Act 1] RDS instance"
-DBID=$(aws rds describe-db-instances --region "$REGION" \
-  --query "DBInstances[?contains(DBInstanceIdentifier,'sentineldb') || contains(DBInstanceIdentifier,'sentinelcommerce')].DBInstanceIdentifier | [0]" \
-  --output text)
-if [[ -z "$DBID" || "$DBID" == "None" ]]; then
-  fail "RDS instance not found"
+# --- Act 1: RDS primary + promotable read replica ---------------------
+echo "[Act 1] RDS primary + read replica"
+PRIMARY=$(aws rds describe-db-instances --region "$REGION" \
+  --query "DBInstances[?ReadReplicaSourceDBInstanceIdentifier==null].DBInstanceIdentifier | [0]" --output text)
+if [[ -z "$PRIMARY" || "$PRIMARY" == "None" ]]; then
+  fail "RDS primary not found"
 else
-  STATUS=$(aws rds describe-db-instances --region "$REGION" --db-instance-identifier "$DBID" \
+  PSTATUS=$(aws rds describe-db-instances --region "$REGION" --db-instance-identifier "$PRIMARY" \
     --query 'DBInstances[0].DBInstanceStatus' --output text)
-  CLASS=$(aws rds describe-db-instances --region "$REGION" --db-instance-identifier "$DBID" \
+  PCLASS=$(aws rds describe-db-instances --region "$REGION" --db-instance-identifier "$PRIMARY" \
     --query 'DBInstances[0].DBInstanceClass' --output text)
-  [[ "$STATUS" == "available" ]] && pass "RDS $DBID available ($CLASS)" || fail "RDS status=$STATUS"
-  [[ "$CLASS" == "db.t4g.micro" || "$CLASS" == "db.t3.micro" ]] && pass "free-tier instance class" || fail "class $CLASS not free-tier"
+  case "$PSTATUS" in
+    available)              pass "primary $PRIMARY available ($PCLASS)";;
+    modifying|backing-up|configuring-enhanced-monitoring)
+                            pass "primary $PRIMARY $PSTATUS (transient - settles on its own)";;
+    *)                      fail "primary status=$PSTATUS";;
+  esac
+  [[ "$PCLASS" == "db.t4g.micro" || "$PCLASS" == "db.t3.micro" ]] && pass "free-tier instance class" || fail "class $PCLASS not free-tier"
+fi
+REPSTATUS=$(aws rds describe-db-instances --region "$REGION" \
+  --db-instance-identifier sentinelcommerce-replica \
+  --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null)
+REPOF=$(aws rds describe-db-instances --region "$REGION" \
+  --db-instance-identifier sentinelcommerce-replica \
+  --query 'DBInstances[0].ReadReplicaSourceDBInstanceIdentifier' --output text 2>/dev/null)
+if [[ "$REPSTATUS" == "available" && -n "$REPOF" && "$REPOF" != "None" ]]; then
+  pass "read replica available and replicating (Act 1 ready)"
+elif [[ "$REPSTATUS" == "creating" || "$REPSTATUS" == "modifying" || "$REPSTATUS" == "backing-up" ]]; then
+  fail "read replica still $REPSTATUS - wait before demoing Act 1"
+elif [[ "$REPSTATUS" == "available" ]]; then
+  pass "replica exists but is ALREADY PROMOTED (standalone) - Act 1 has been used"
+else
+  fail "read replica missing - run: ./scripts/demo.sh replica"
 fi
 
 # --- Act 2: DynamoDB stream event source mapping Enabled -------------

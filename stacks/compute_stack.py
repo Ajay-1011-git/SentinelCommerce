@@ -79,7 +79,11 @@ class ComputeStack(Stack):
             log_retention=logs.RetentionDays.ONE_WEEK,
             environment={
                 "TABLE_NAME": dynamo_table.table_name,
-                "RATE_LIMIT": "100",
+                # 25/5min, tuned for a live demo: a burst of ~30 curl calls
+                # trips it in seconds. (WAF's own minimum was 100; we are not
+                # bound by that since this is our own limiter.) Reset the
+                # counter between rehearsals with `scripts/demo.sh reset`.
+                "RATE_LIMIT": "25",
                 "RATE_WINDOW_SECONDS": "300",
                 "ALERT_TOPIC_ARN": self.alerts_topic.topic_arn,
             },
