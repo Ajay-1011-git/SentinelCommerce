@@ -94,3 +94,24 @@ log groups · tagged security groups.
 
 Only `CDKToolkit` (the CDK bootstrap stack — one S3 bucket, effectively
 free) is retained for future deploys. **Running cost now: $0.**
+
+
+---
+
+## Post-demo teardown — 2026-09-13
+
+Demo presented successfully. Full teardown run immediately after:
+
+- `sentinelcommerce-replica` deleted (was never promoted during the live demo —
+  Act 1 was presented but the replica's `ReadReplicaSourceDBInstanceIdentifier`
+  was still set at teardown time, i.e. it stayed a replica)
+- `cdk destroy --all` → all 7 stacks destroyed cleanly
+- `/sentinelcommerce/db-password` SSM parameter deleted
+- 9 residual CloudWatch log groups deleted
+
+**Final verification: zero SentinelCommerce resources remain.** No stacks, no RDS,
+no VPC/NAT, no SSM params, no SNS topics, no budgets, no EventBridge rules, no
+tagged security groups, no log groups. Only `CDKToolkit` (the CDK bootstrap
+stack — one S3 bucket, no cost) remains for future deploys.
+
+**Account is fully back to $0.**
